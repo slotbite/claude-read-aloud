@@ -8,6 +8,16 @@ DATA = json.loads((HERE / "textos.json").read_text(encoding="utf-8"))
 TEXTOS = {k: v["texto"] for k, v in DATA["textos"].items()}
 REF_TEXT = DATA["referencia"]["texto"]
 REF_WAV = BENCH / "ref" / "ref_ef_dora.wav"
+CLONES = BENCH / "ref" / "clones"  # lo llena importar_refs.py
+
+
+def clones():
+    """Referencias importadas: [(voz, wav, info)] con voz = "clon_<persona>"."""
+    p = CLONES / "refs.json"
+    if not p.exists():
+        return []
+    refs = json.loads(p.read_text(encoding="utf-8"))
+    return [(f"clon_{k}", CLONES / f"{k}.wav", v) for k, v in refs.items()]
 
 
 def primera_oracion(texto):

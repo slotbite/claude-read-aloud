@@ -1,5 +1,6 @@
 """OmniVoice (k2-fsa) en GPU fp16, sin FlashInfer ni flash-attn.
-Voces: "auto" (sin referencia) y "clon_ef_dora" (clona bench\\ref\\ref_ef_dora.wav + su texto).
+Voces: "auto" (sin referencia), "clon_ef_dora" (bench\\ref\\ref_ef_dora.wav + su texto) y
+"clon_<persona>" (bench\\ref\\clones, ver importar_refs.py; Whisper transcribe la referencia).
 El prompt de clonación se calcula una vez (su tiempo va en meta.prompt_clon_s).
 Uso: bench\\venvs\\omnivoice\\Scripts\\python.exe bench\\voces\\run_omnivoice.py"""
 import os
@@ -20,6 +21,29 @@ prompt, t_prompt = timed(lambda: m.create_voice_clone_prompt(
 rec.meta["prompt_clon_s"] = round(t_prompt, 2)
 
 VOCES = {"auto": {}, "clon_ef_dora": {"voice_clone_prompt": prompt}}
+
+# Referencias de importar_refs.py: sin transcripción, la hace Whisper (se guarda en refs.json
+# para no repetirla). Una referencia que falla no corta el resto.
+rec.meta["idiomas"], rec.meta["errores"] = {}, {}
+refs_json = CLONES / "refs.json"
+for voz, wav, info in clones():
+    rec.meta["idiomas"][voz] = info["idioma"]
+    try:
+        if not info.get("texto"):
+            if getattr(m, "_asr_pipe", None) is None:
+                m.load_asr_model()  # whisper-large-v3-turbo, solo la primera vez
+            onda, sr = sf.read(wav, dtype="float32")  # con ruta, Whisper exige ffmpeg
+            info["texto"] = m.transcribe((onda, sr)).strip()
+            refs = json.loads(refs_json.read_text(encoding="utf-8"))
+            refs[voz.removeprefix("clon_")]["texto"] = info["texto"]
+            refs_json.write_text(json.dumps(refs, ensure_ascii=False, indent=1), encoding="utf-8")
+        VOCES[voz] = {"voice_clone_prompt": m.create_voice_clone_prompt(
+            ref_audio=str(wav), ref_text=info.get("texto"))}
+    except Exception as e:
+        rec.meta["errores"][voz] = f"{type(e).__name__}: {e}"
+        print("FALLO", voz, rec.meta["errores"][voz], flush=True)
+m._asr_pipe = None  # libera Whisper para que no infle la VRAM medida
+torch.cuda.empty_cache()
 
 
 def sint(texto, kw):

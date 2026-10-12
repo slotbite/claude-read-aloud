@@ -43,6 +43,7 @@ button.exp{background:var(--ac);color:#fff;border:0;border-radius:6px;padding:6p
  <button class="exp" id="exp">Exportar votos</button></p>
 <h2>Resumen</h2>
 <div class="scroll"><table id="resumen"></table></div>
+<div id="refs"></div>
 <div class="filtros" id="filtros">
   <label>Voz <select id="f-idioma">
     <option value="es">Solo español (nativas y clones)</option>
@@ -73,7 +74,8 @@ const IDIOMA_VOZ = {
   "pocket/clon_ef_dora": "es",
   "omnivoice/auto": "multi", "omnivoice/clon_ef_dora": "es",
 };
-const idiomaDe = (m, v) => IDIOMA_VOZ[`${m}/${v}`] || "?";
+// Los clones de importar_refs.py traen su idioma en meta.idiomas.
+const idiomaDe = (m, v) => IDIOMA_VOZ[`${m.modelo}/${v}`] || (m.meta.idiomas || {})[v] || "?";
 const ETIQUETA = { es: "español", multi: "multilingüe", en: "inglés", pt: "portugués", "?": "sin dato" };
 
 // tabla resumen
@@ -93,6 +95,23 @@ for (const m of D.modelos) {
   }
 }
 
+// referencias originales de los clones, para comparar
+if (D.refs && Object.keys(D.refs).length) {
+  const box = document.getElementById("refs");
+  box.appendChild($("h2", "", "Referencias de clonación (10 s originales)"));
+  const g = $("div", "grid");
+  for (const [p, r] of Object.entries(D.refs)) {
+    const c = $("div", "card"), tit = $("b", "", `clon_${p}`);
+    tit.appendChild($("span", "idioma " + (r.idioma === "es" ? "es" : "otro"), ETIQUETA[r.idioma] || r.idioma));
+    const a = $("audio"); a.controls = true; a.preload = "none"; a.src = `ref/clones/${p}.wav`;
+    c.append(tit, a, $("div", "chips"));
+    c.lastChild.append($("span", "chip", `${r.pct_habla} % habla`), $("span", "chip", r.origen.split("/").pop()));
+    if (r.texto) c.appendChild($("p", "mut", `«${r.texto}»`));
+    g.appendChild(c);
+  }
+  box.appendChild(g);
+}
+
 // textos × modelo/voz
 const cont = document.getElementById("textos");
 for (const [tid, tx] of Object.entries(D.textos)) {
@@ -102,7 +121,7 @@ for (const [tid, tx] of Object.entries(D.textos)) {
   for (const m of D.modelos) {
     for (const f of m.filas.filter(f => f.texto === tid)) {
       const id = `${m.modelo}/${f.voz}/${tid}`, c = $("div", "card");
-      const idi = idiomaDe(m.modelo, f.voz);
+      const idi = idiomaDe(m, f.voz);
       c.dataset.modelo = m.modelo; c.dataset.voz = f.voz; c.dataset.idioma = idi;
       const tit = $("b", "", `${m.modelo} · ${f.voz}`);
       tit.appendChild($("span", "idioma " + (idi === "es" ? "es" : idi === "multi" ? "" : "otro"), ETIQUETA[idi]));
@@ -146,7 +165,7 @@ function aplicar() {
   try { localStorage.setItem(FKEY, JSON.stringify(F)); } catch (e) {}
   const ok = PERMITIDOS[F.idioma];
   const vistas = new Set();
-  for (const c of document.querySelectorAll(".card")) {
+  for (const c of document.querySelectorAll("#textos .card")) {
     const ve = (!ok || ok.includes(c.dataset.idioma)) && !F.fuera.includes(c.dataset.modelo)
       && (!F.q || `${c.dataset.modelo} ${c.dataset.voz}`.toLowerCase().includes(F.q));
     c.classList.toggle("oculto", !ve);

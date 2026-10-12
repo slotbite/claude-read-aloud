@@ -39,7 +39,11 @@ def tanda(voz, fuente):
         print("FALLO", voz, rec.meta["errores"][voz], flush=True)
 
 
+rec.meta["idiomas"] = {}
 tanda("clon_ef_dora", str(REF_WAV))
+for voz, wav, info in clones():   # referencias de importar_refs.py
+    rec.meta["idiomas"][voz] = info["idioma"]
+    tanda(voz, str(wav))
 tanda("preset_lola", "lola")      # voz por defecto de español (Common Voice es)
 tanda("preset_rafael", "rafael")  # voz por defecto de portugués, como contraste
 tanda("preset_alba", "alba")      # voz inglesa leyendo español

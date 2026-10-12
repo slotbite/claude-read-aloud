@@ -18,8 +18,12 @@
   WAV con textos fijos, mide carga/RTF/VRAM y produce un `index.html` local para escuchar y
   votar. Resultados en `docs/voces/exp-2-resultados.md`; candidatos en
   `docs/voces/sonda-1-candidatos.md`.
+- `bench/voces/importar_refs.py`: importa referencias limpias de voz-limpia como voces
+  `clon_<persona>` para Pocket y OmniVoice; el index muestra las referencias originales.
 
 ### Corregido
+- Pocket TTS no clonaba aunque hubiera `hf auth login`: el banco fijaba `HF_HOME` y el token
+  quedaba fuera; ahora usa `HF_HUB_CACHE`.
 - Dos proyectos abiertos con auto-lectura ya no se cortan ni se superponen.
 - `--stop` sin `--session` detiene lo que suena y vacía la cola; con `--session X`, solo X.
   En Windows ahora mata también el reproductor (`taskkill /T`).

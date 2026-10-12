@@ -18,7 +18,9 @@ for r in modelos:
 
 datos = dict(
     textos={k: dict(nombre=v["nombre"], texto=v["texto"]) for k, v in DATA["textos"].items()},
-    modelos=modelos)
+    modelos=modelos,
+    refs=json.loads((CLONES / "refs.json").read_text(encoding="utf-8"))
+    if (CLONES / "refs.json").exists() else {})
 (BENCH / "resultados.json").write_text(json.dumps(datos, ensure_ascii=False, indent=1), encoding="utf-8")
 
 plantilla = (HERE / "index.template.html").read_text(encoding="utf-8")

@@ -37,6 +37,20 @@ python build_index.py                      # une res\*.json -> resultados.json +
 
 Abrir `%LOCALAPPDATA%\claude-read-aloud\bench\index.html` con doble clic.
 
+### Clonar voces propias (opcional)
+
+Desde una carpeta procesada por [voz-limpia](https://github.com/slotbite/voz-limpia), antes de
+correr Pocket y OmniVoice:
+
+```powershell
+python importar_refs.py C:\ruta\voces_limpia --idioma persona_en_ingles=en
+```
+
+Por persona (subcarpeta) toma la referencia de 10 s del audio con más % de habla y la copia a
+`bench\ref\clones\`; cada una aparece como voz `clon_<persona>` en ambos modelos y el index
+muestra la referencia original para comparar. OmniVoice la transcribe con Whisper la primera vez
+(queda en `refs.json`). Clona solo voces que tengas permiso de usar; nada de esto se versiona.
+
 ## Notas
 
 - Cada runner hace un calentamiento (texto t5) antes de medir. La carga del modelo se mide con
@@ -45,5 +59,5 @@ Abrir `%LOCALAPPDATA%\claude-read-aloud\bench\index.html` con doble clic.
   motores se usó en modo streaming).
 - Los textos están en `textos.json`; la plantilla del HTML en `index.template.html`.
 - **Pocket con clonación** exige aceptar los términos de `kyutai/pocket-tts` y
-  `hf auth login` (ver `docs/voces/exp-2-resultados.md`). Con acceso, `run_pocket.py` ya
-  intenta `clon_ef_dora` primero.
+  `hf auth login` (ver `docs/voces/exp-2-resultados.md`). El runner usa `HF_HUB_CACHE`, no
+  `HF_HOME`, para que el token se encuentre.
