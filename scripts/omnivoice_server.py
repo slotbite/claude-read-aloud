@@ -119,12 +119,14 @@ def do_synth(q: dict) -> dict:
 
     t0 = time.time()
     with gpu_lock:
-        prompt, vlang = voice_prompt(q.get("voice") or "")
+        prompt, _ = voice_prompt(q.get("voice") or "")
         speed = float(q.get("speed") or 1.0)
         kw = {"voice_clone_prompt": prompt} if prompt is not None else {}
         audio = state["model"].generate(
             text=q["text"],
-            language=q.get("lang") or vlang or None,
+            # The language of the TEXT, never the voice's: an English voice must still
+            # read a Spanish reply as Spanish. "" = OmniVoice detects it from the text.
+            language=q.get("lang") or None,
             num_step=int(q.get("steps") or 16),
             speed=None if abs(speed - 1.0) < 0.01 else speed,
             **kw,

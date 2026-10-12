@@ -116,7 +116,7 @@ DEFAULTS = {
     "omnivoice_port": 7853,  # loopback port of the persistent OmniVoice server
     "omnivoice_idle_min": 15,  # server exits after this many idle minutes (frees VRAM)
     "omnivoice_python": "",  # python of an existing OmniVoice venv; "" = our own
-    "omnivoice_lang": "",  # "" = the voice's own language / auto-detect
+    "omnivoice_lang": "",  # language of the text (es, en…); "" = auto-detect from the text
     "omnivoice_hf_cache": "",  # HF_HUB_CACHE for the model; "" = default (see docs)
     "api_keys": {},  # optional; env vars take precedence
 }
