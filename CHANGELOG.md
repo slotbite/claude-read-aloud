@@ -7,6 +7,11 @@
   proveedor (int-4) — ver `docs/plan.md`.
 
 ### Agregado
+- Proveedor `omnivoice` (int-4, clonación de voz local): servidor persistente en loopback
+  (`scripts/omnivoice_server.py`, se lanza solo, sobrevive a `--stop` y se apaga tras
+  `omnivoice_idle_min` min sin uso), biblioteca de voces en `<data>/voces/` (`--add-voice`,
+  `--remove-voice`, `--list-voices`; transcribe con Whisper si falta `--ref-text`),
+  `--setup omnivoice`, `--render`, `--stop-server`. Mediciones en `docs/voces/int-4-omnivoice.md`.
 - Cola global FIFO de lecturas (fix-3): un solo audio a la vez en toda la máquina, con lock
   entre procesos (`O_EXCL` + recuperación de lock huérfano; PID vivo por `ctypes` en Windows).
   Lectura nueva de la misma sesión reemplaza a la suya; la de otra sesión espera (máx. 10 min).
