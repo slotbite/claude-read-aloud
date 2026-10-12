@@ -36,7 +36,16 @@ Registro del lote: `.orquestacion/voces-cola/` (local, no versionado).
 | sonda-1 | Investigar candidatos: español, tamaño, CPU/GPU, Windows, API, licencia | sonda (solo lectura) | — | `docs/voces/sonda-1-candidatos.md` |
 | exp-2 | Banco local: instalar finalistas, generar WAV con textos fijos, medir latencia/RTF, `index.html` para escuchar y votar | ejecutor | sonda-1 | `bench/voces/` + `docs/voces/exp-2-resultados.md` |
 | fix-3 | Cola de reproducción por `session_id` en `speak.py` | ejecutor | — | cambios en `scripts/`, `hooks/`, `skills/` |
-| int-4 | Integrar el ganador como proveedor (si lo hay) | ejecutor | exp-2 + decisión del usuario | — |
+| int-4 | Proveedor `omnivoice` (servidor local persistente) + biblioteca de voces clonadas | ejecutor | exp-2 + decisión del usuario | `scripts/`, `skills/`, docs |
+
+## Decisión del usuario (2026-10-12)
+
+- **Gana OmniVoice** escuchando el banco: los clones suenan claramente mejor que los de Pocket.
+- **Pocket TTS queda descartado**; su runner sigue en `bench/voces/` solo como registro.
+- Las voces clonadas se guardan en una biblioteca local del plugin para elegirlas después. Las
+  referencias son de terceros: viven en `%LOCALAPPDATA%`, nunca en git.
+- Una de las voces clonadas tiene altibajos de volumen en el texto largo: probar sus otras
+  referencias.
 
 ## Diseño de fix-3 (cola por sesión)
 
