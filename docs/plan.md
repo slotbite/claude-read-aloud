@@ -50,4 +50,8 @@ Registro del lote: `.orquestacion/voces-cola/` (local, no versionado).
 
 ## Estado
 
+- exp-2 hecho: banco en `bench/voces/`. En CPU Kokoro y Supertonic rinden RTF ~0,35 (primer audio
+  1,1–1,4 s), Pocket 0,48 (clonación bloqueada por HF gated), OmniVoice en GPU 0,27 con 2,5 GB
+  de VRAM. Detalle en `docs/voces/exp-2-resultados.md`.
+
 Ver `CHANGELOG.md` para lo ya hecho.

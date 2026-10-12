@@ -8,6 +8,9 @@
 - Cola de reproducción por sesión para que dos proyectos no hablen a la vez.
 
 ### Agregado
+- Banco de voces en `bench/voces/` (Kokoro, Supertonic-3, Pocket TTS, OmniVoice): genera WAV con
+  textos fijos, mide carga/RTF/VRAM y produce un `index.html` local para escuchar y votar.
+  Resultados en `docs/voces/exp-2-resultados.md`.
 - (WIP) Aislamiento de archivos PID/WAV por sesión en `scripts/speak.py` (`--session`,
   `READ_ALOUD_SESSION`). Base de la cola por sesión; se completa en fix-3.
 
