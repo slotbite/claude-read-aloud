@@ -59,6 +59,11 @@ Los tiempos completos por voz y texto están en `resultados.json` (regenerable).
   **Acción del usuario si quiere probar la clonación**: aceptar los términos en
   https://huggingface.co/kyutai/pocket-tts, correr `hf auth login` (o `uvx hf auth login`) y
   repetir `run_pocket.py` (intenta `clon_ef_dora` primero).
+  **Actualización 2026-10-12**: con los términos aceptados y `hf auth login` hecho, seguía
+  fallando igual: `run_pocket.py` fijaba `HF_HOME` en la carpeta del banco, y ahí no está el
+  token, así que Pocket caía sin aviso al modelo sin clonación (la excepción real se traga en
+  `tts_model.py`). Se cambió a `HF_HUB_CACHE`. Clonación probada: `clon_ef_dora`, RTF
+  0,47–0,52 en CPU, igual que las voces predefinidas.
 - **Pocket en Windows**: `load_model` falla con `UnicodeDecodeError: 'charmap' codec can't
   decode byte 0x9d` al leer su YAML con la codificación por defecto; se resuelve ejecutando
   Python con `-X utf8` (`-I` ignora `PYTHONUTF8`).

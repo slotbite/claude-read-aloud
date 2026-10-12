@@ -6,7 +6,10 @@ Uso: bench\\venvs\\pocket\\Scripts\\python.exe -X utf8 bench\\voces\\run_pocket.
 import os
 from common import *
 
-os.environ["HF_HOME"] = str(BENCH / "models" / "hf-pocket")
+# HF_HUB_CACHE y no HF_HOME: con HF_HOME el token de `hf auth login` queda fuera y
+# Pocket cae sin aviso al modelo sin clonación.
+os.environ["HF_HUB_CACHE"] = str(BENCH / "models" / "hf-pocket" / "hub")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 import soundfile as sf
 from pocket_tts import TTSModel
 
