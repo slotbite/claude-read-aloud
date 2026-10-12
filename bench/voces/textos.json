@@ -1,0 +1,12 @@
+{
+  "textos": {
+    "t1": {"nombre": "respuesta", "texto": "Revisé el repositorio y encontré dos problemas. El primero está en la función de detención: no limpia el archivo temporal cuando la lectura termina antes de tiempo."},
+    "t2": {"nombre": "tecnicismos", "texto": "Agregué un hook nuevo en el archivo de configuración y actualicé el README con los pasos de instalación. Después hice commit y push a la rama principal."},
+    "t3": {"nombre": "numeros", "texto": "La versión 2.3 usa 8 GB de memoria y responde en 300 milisegundos, un 40 % más rápido que antes."},
+    "t4": {"nombre": "largo", "texto": "Terminé la migración del módulo de autenticación. Moví la validación de tokens a un servicio aparte, así que ahora puedes reutilizarla desde la API y desde el panel. También corregí un error que cerraba la sesión sin avisar cuando el token vencía durante una petición larga. Escribí doce pruebas nuevas y todas pasan, pero dejé pendiente el caso de los usuarios que inician sesión desde dos dispositivos a la vez. Si quieres, lo reviso en el siguiente paso."},
+    "t5": {"nombre": "corto", "texto": "Listo, ya quedó."}
+  },
+  "referencia": {
+    "texto": "Hola, esta es una voz de referencia que usaré para clonar el tono. Hablo despacio y con claridad, para que el modelo capture bien el timbre y el ritmo."
+  }
+}

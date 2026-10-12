@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Banco de voces</title>
+<style>
+:root{--bg:#fafafa;--fg:#1c1c1e;--mut:#6b6b70;--card:#fff;--bd:#dcdce0;--ac:#2f6fed;--star:#e0a100;--ok:#1f8a4c;--bad:#c0392b}
+@media (prefers-color-scheme:dark){:root{--bg:#161618;--fg:#e8e8ea;--mut:#9a9aa2;--card:#1f1f23;--bd:#34343a;--ac:#6b9bff;--star:#f0b400;--ok:#4cc98a;--bad:#ff7a6b}}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif;max-width:1400px;margin-inline:auto}
+h1{margin:.2em 0}h2{margin:1.6em 0 .2em;font-size:1.1em}
+.mut{color:var(--mut)}
+table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--bd)}
+th,td{padding:6px 10px;border-bottom:1px solid var(--bd);text-align:left;font-size:.9em}
+th{color:var(--mut);font-weight:600}
+.scroll{overflow-x:auto}
+.texto{margin:.2em 0 .6em;font-style:italic}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px}
+.card b{display:block}
+audio{width:100%;margin:6px 0}
+.chips{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
+.chip{background:var(--bg);border:1px solid var(--bd);border-radius:99px;padding:0 8px;font-size:.78em;color:var(--mut)}
+.stars button{background:none;border:0;font-size:1.4em;line-height:1;cursor:pointer;color:var(--bd);padding:0 2px}
+.stars button.on{color:var(--star)}
+button.exp{background:var(--ac);color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer}
+.err{color:var(--bad);font-size:.85em}
+.falta{color:var(--mut);font-size:.85em}
+</style>
+</head>
+<body>
+<h1>Banco de voces</h1>
+<p class="mut">Mismos textos, cada modelo/voz. Puntúa de 1 a 5 estrellas (se guarda en este navegador).
+ <button class="exp" id="exp">Exportar votos</button></p>
+<h2>Resumen</h2>
+<div class="scroll"><table id="resumen"></table></div>
+<div id="textos"></div>
+<script>
+const D = /*DATOS*/null;
+const $ = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.textContent = h; return e; };
+const KEY = "banco-voces-votos";
+let votos = {};
+try { votos = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) {}
+const guardar = () => { try { localStorage.setItem(KEY, JSON.stringify(votos)); } catch (e) {} };
+const fmt = (v, u = "") => v == null ? "—" : v + u;
+
+// tabla resumen
+const t = document.getElementById("resumen");
+const cab = ["Modelo", "Voces", "Tamaño", "Carga", "RTF medio", "1.er audio", "VRAM pico", "Disp.", "Licencia"];
+t.appendChild(Object.assign($("tr"), {})).append(...cab.map(c => $("th", "", c)));
+for (const m of D.modelos) {
+  const r = m.resumen, tr = $("tr");
+  const errs = Object.entries(m.meta.errores || {});
+  tr.append($("td", "", m.modelo), $("td", "", r.voces.join(", ")), $("td", "", fmt(m.meta.tamano_mb, " MB")),
+    $("td", "", fmt(m.meta.carga_s, " s")), $("td", "", fmt(r.rtf_medio)), $("td", "", fmt(r.primer_audio_s, " s")),
+    $("td", "", fmt(r.vram_mb, " MB")), $("td", "", fmt(m.meta.dispositivo)), $("td", "", fmt(m.meta.licencia)));
+  t.appendChild(tr);
+  for (const [v, e] of errs) {
+    const er = $("tr"), td = $("td", "err", `${m.modelo}/${v} falló: ${e.slice(0, 160)}`);
+    td.colSpan = cab.length; er.appendChild(td); t.appendChild(er);
+  }
+}
+
+// textos × modelo/voz
+const cont = document.getElementById("textos");
+for (const [tid, tx] of Object.entries(D.textos)) {
+  cont.appendChild($("h2", "", `${tid} · ${tx.nombre}`));
+  cont.appendChild($("p", "texto", tx.texto));
+  const g = $("div", "grid");
+  for (const m of D.modelos) {
+    for (const f of m.filas.filter(f => f.texto === tid)) {
+      const id = `${m.modelo}/${f.voz}/${tid}`, c = $("div", "card");
+      c.appendChild($("b", "", `${m.modelo} · ${f.voz}`));
+      const a = $("audio"); a.controls = true; a.preload = "none"; a.src = `out/${m.modelo}/${f.voz}/${tid}.wav`;
+      c.appendChild(a);
+      const ch = $("div", "chips");
+      for (const s of [`RTF ${f.rtf}`, `sint ${f.sintesis_s} s`, `audio ${f.duracion_s} s`,
+          f.primer_audio_s != null ? `1.er audio ${f.primer_audio_s} s` : null, f.vram_mb ? `VRAM ${f.vram_mb} MB` : null, f.dispositivo])
+        if (s) ch.appendChild($("span", "chip", s));
+      c.appendChild(ch);
+      const st = $("div", "stars");
+      const pintar = () => st.childNodes.forEach((b, i) => b.classList.toggle("on", i < (votos[id] || 0)));
+      for (let n = 1; n <= 5; n++) {
+        const b = $("button", "", "★"); b.title = n + " de 5";
+        b.onclick = () => { votos[id] = votos[id] === n ? 0 : n; guardar(); pintar(); };
+        st.appendChild(b);
+      }
+      pintar(); c.appendChild(st); g.appendChild(c);
+    }
+  }
+  cont.appendChild(g);
+}
+
+document.getElementById("exp").onclick = () => {
+  const blob = new Blob([JSON.stringify(votos, null, 1)], { type: "application/json" });
+  const a = $("a"); a.href = URL.createObjectURL(blob); a.download = "votos-voces.json"; a.click();
+};
+</script>
+</body>
+</html>

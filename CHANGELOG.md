@@ -3,8 +3,8 @@
 ## [Sin publicar]
 
 ### En curso
-- Banco de voces en español (Kokoro, Pocket TTS, OmniVoice y otros) con página local para
-  comparar — ver `docs/plan.md`.
+- Elegir voz en español escuchando el banco (`bench/voces/`) y, si hay ganador, integrarlo como
+  proveedor (int-4) — ver `docs/plan.md`.
 
 ### Agregado
 - Cola global FIFO de lecturas (fix-3): un solo audio a la vez en toda la máquina, con lock
@@ -14,6 +14,10 @@
   `manual`. WAV aislados por sesión. `speak-opencode.py` usa la sesión `opencode`.
 - Opción `announce_project` (apagada por defecto): antepone el nombre de la carpeta del
   proyecto cuando cambia quien habla. Pruebas en `tests/test_queue.py`.
+- Banco de voces en `bench/voces/` (exp-2: Kokoro, Supertonic-3, Pocket TTS, OmniVoice): genera
+  WAV con textos fijos, mide carga/RTF/VRAM y produce un `index.html` local para escuchar y
+  votar. Resultados en `docs/voces/exp-2-resultados.md`; candidatos en
+  `docs/voces/sonda-1-candidatos.md`.
 
 ### Corregido
 - Dos proyectos abiertos con auto-lectura ya no se cortan ni se superponen.
