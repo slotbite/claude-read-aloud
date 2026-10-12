@@ -27,7 +27,7 @@ def main():
     # Escape for shell
     escaped = text.replace('"', '\\"').replace("\n", " ")
 
-    cmd = f'python "{SCRIPT}" --detach --text "{escaped}"'
+    cmd = f'python "{SCRIPT}" --detach --session opencode --text "{escaped}"'
     subprocess.run(cmd, shell=True)
     print("reading aloud")
     return 0
