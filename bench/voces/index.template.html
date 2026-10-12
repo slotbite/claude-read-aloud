@@ -27,6 +27,14 @@ audio{width:100%;margin:6px 0}
 button.exp{background:var(--ac);color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer}
 .err{color:var(--bad);font-size:.85em}
 .falta{color:var(--mut);font-size:.85em}
+.filtros{position:sticky;top:0;z-index:1;background:var(--bg);border-bottom:1px solid var(--bd);padding:8px 0;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center}
+.filtros label{display:inline-flex;gap:4px;align-items:center;font-size:.9em}
+.filtros select,.filtros input[type=search]{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:4px 8px;font:inherit}
+.filtros input[type=search]{min-width:0;width:180px}
+.idioma{font-size:.75em;border-radius:4px;padding:0 6px;margin-left:6px;vertical-align:middle;border:1px solid var(--bd)}
+.idioma.es{color:var(--ok);border-color:var(--ok)}
+.idioma.otro{color:var(--bad);border-color:var(--bad)}
+.oculto{display:none}
 </style>
 </head>
 <body>
@@ -35,6 +43,16 @@ button.exp{background:var(--ac);color:#fff;border:0;border-radius:6px;padding:6p
  <button class="exp" id="exp">Exportar votos</button></p>
 <h2>Resumen</h2>
 <div class="scroll"><table id="resumen"></table></div>
+<div class="filtros" id="filtros">
+  <label>Voz <select id="f-idioma">
+    <option value="es">Solo español (nativas y clones)</option>
+    <option value="es+multi">Español + multilingües</option>
+    <option value="todas">Todas</option>
+  </select></label>
+  <span id="f-modelos"></span>
+  <label><input type="search" id="f-buscar" placeholder="Buscar modelo o voz"></label>
+  <span class="mut" id="f-cuenta"></span>
+</div>
 <div id="textos"></div>
 <script>
 const D = /*DATOS*/null;
@@ -44,6 +62,18 @@ let votos = {};
 try { votos = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) {}
 const guardar = () => { try { localStorage.setItem(KEY, JSON.stringify(votos)); } catch (e) {} };
 const fmt = (v, u = "") => v == null ? "—" : v + u;
+
+// Idioma de origen de cada voz (verificado en el código de cada paquete).
+// es = grabada/entrenada en español o clonada de una voz española; multi = voz
+// sin idioma propio que lee en el idioma pedido; en/pt = voz de otro idioma.
+const IDIOMA_VOZ = {
+  "kokoro/ef_dora": "es", "kokoro/em_alex": "es",
+  "supertonic/F1": "multi", "supertonic/M1": "multi",
+  "pocket/preset_lola": "es", "pocket/preset_rafael": "pt", "pocket/preset_alba": "en",
+  "omnivoice/auto": "multi", "omnivoice/clon_ef_dora": "es",
+};
+const idiomaDe = (m, v) => IDIOMA_VOZ[`${m}/${v}`] || "?";
+const ETIQUETA = { es: "español", multi: "multilingüe", en: "inglés", pt: "portugués", "?": "sin dato" };
 
 // tabla resumen
 const t = document.getElementById("resumen");
@@ -71,7 +101,11 @@ for (const [tid, tx] of Object.entries(D.textos)) {
   for (const m of D.modelos) {
     for (const f of m.filas.filter(f => f.texto === tid)) {
       const id = `${m.modelo}/${f.voz}/${tid}`, c = $("div", "card");
-      c.appendChild($("b", "", `${m.modelo} · ${f.voz}`));
+      const idi = idiomaDe(m.modelo, f.voz);
+      c.dataset.modelo = m.modelo; c.dataset.voz = f.voz; c.dataset.idioma = idi;
+      const tit = $("b", "", `${m.modelo} · ${f.voz}`);
+      tit.appendChild($("span", "idioma " + (idi === "es" ? "es" : idi === "multi" ? "" : "otro"), ETIQUETA[idi]));
+      c.appendChild(tit);
       const a = $("audio"); a.controls = true; a.preload = "none"; a.src = `out/${m.modelo}/${f.voz}/${tid}.wav`;
       c.appendChild(a);
       const ch = $("div", "chips");
@@ -91,6 +125,37 @@ for (const [tid, tx] of Object.entries(D.textos)) {
   }
   cont.appendChild(g);
 }
+
+// filtros (se recuerdan en este navegador)
+const FKEY = "banco-voces-filtros";
+let F = { idioma: "es", fuera: [], q: "" };
+try { Object.assign(F, JSON.parse(localStorage.getItem(FKEY) || "{}")); } catch (e) {}
+const selIdioma = document.getElementById("f-idioma"), buscar = document.getElementById("f-buscar");
+selIdioma.value = F.idioma; buscar.value = F.q;
+const cajaModelos = document.getElementById("f-modelos");
+for (const m of D.modelos) {
+  const lb = $("label"), cb = $("input");
+  cb.type = "checkbox"; cb.checked = !F.fuera.includes(m.modelo);
+  cb.onchange = () => { F.fuera = cb.checked ? F.fuera.filter(x => x !== m.modelo) : [...F.fuera, m.modelo]; aplicar(); };
+  lb.append(cb, m.modelo); cajaModelos.appendChild(lb);
+}
+const PERMITIDOS = { es: ["es"], "es+multi": ["es", "multi"], todas: null };
+function aplicar() {
+  F.idioma = selIdioma.value; F.q = buscar.value.trim().toLowerCase();
+  try { localStorage.setItem(FKEY, JSON.stringify(F)); } catch (e) {}
+  const ok = PERMITIDOS[F.idioma];
+  const vistas = new Set();
+  for (const c of document.querySelectorAll(".card")) {
+    const ve = (!ok || ok.includes(c.dataset.idioma)) && !F.fuera.includes(c.dataset.modelo)
+      && (!F.q || `${c.dataset.modelo} ${c.dataset.voz}`.toLowerCase().includes(F.q));
+    c.classList.toggle("oculto", !ve);
+    if (ve) vistas.add(`${c.dataset.modelo}/${c.dataset.voz}`);
+    if (!ve) c.querySelector("audio")?.pause();
+  }
+  document.getElementById("f-cuenta").textContent = `${vistas.size} voces visibles`;
+}
+selIdioma.onchange = aplicar; buscar.oninput = aplicar;
+aplicar();
 
 document.getElementById("exp").onclick = () => {
   const blob = new Blob([JSON.stringify(votos, null, 1)], { type: "application/json" });

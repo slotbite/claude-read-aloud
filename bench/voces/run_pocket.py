@@ -37,8 +37,8 @@ def tanda(voz, fuente):
 
 
 tanda("clon_ef_dora", str(REF_WAV))
-tanda("preset_lola", "lola")      # el catálogo sugiere voces nativas por idioma
-tanda("preset_rafael", "rafael")
+tanda("preset_lola", "lola")      # voz por defecto de español (Common Voice es)
+tanda("preset_rafael", "rafael")  # voz por defecto de portugués, como contraste
 tanda("preset_alba", "alba")      # voz inglesa leyendo español
 rec.meta["tamano_mb"] = dir_size_mb(BENCH / "models" / "hf-pocket")
 rec.save()

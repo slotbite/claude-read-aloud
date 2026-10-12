@@ -52,8 +52,10 @@ Los tiempos completos por voz y texto están en `resultados.json` (regenerable).
   https://huggingface.co/kyutai/pocket-tts and accept the terms, then make sure you're logged
   in locally with `uvx hf auth login`.` Sin token no se pidió ninguna credencial. Sin
   clonación, `load_model(language="spanish")` descarga sin login y trae un catálogo de voces
-  predefinidas; se probaron `lola`, `rafael` (nombres españoles; no verificado que sean
-  nativas de español) y `alba` (inglesa leyendo español).
+  predefinidas; se probaron `lola`, `rafael` y `alba`. Verificado después en
+  `pocket_tts/default_parameters.py` y `utils/utils.py`: `lola` es la voz por defecto de
+  español (grabación de Common Voice `es`), **`rafael` es la de portugués** y `alba` la de
+  inglés. Solo `lola` es nativa de español; las otras dos leen español con otro acento.
   **Acción del usuario si quiere probar la clonación**: aceptar los términos en
   https://huggingface.co/kyutai/pocket-tts, correr `hf auth login` (o `uvx hf auth login`) y
   repetir `run_pocket.py` (intenta `clon_ef_dora` primero).
