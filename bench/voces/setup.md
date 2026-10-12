@@ -50,6 +50,9 @@ Por persona (subcarpeta) toma la referencia de 10 s del audio con más % de habl
 `bench\ref\clones\`; cada una aparece como voz `clon_<persona>` en ambos modelos y el index
 muestra la referencia original para comparar. OmniVoice la transcribe con Whisper la primera vez
 (queda en `refs.json`). Clona solo voces que tengas permiso de usar; nada de esto se versiona.
+`--todas persona` importa además cada una de sus otras referencias como
+`clon_<persona>_<id>`, para comparar cuál clona mejor. Pocket quedó descartado (los clones de
+OmniVoice suenan mejor): su runner se conserva solo como registro.
 
 ## Notas
 
