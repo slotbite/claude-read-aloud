@@ -2,3 +2,10 @@ __pycache__/
 *.pyc
 node_modules/
 *.vsix
+
+# coordinaciÃ³n de agentes
+.claude/worktrees/
+.orquestacion/
+# banco de voces: audios y entornos generados
+bench/voces/out/
+bench/voces/.venvs/

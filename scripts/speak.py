@@ -53,13 +53,35 @@ import wave
 
 HOME = pathlib.Path.home()
 PROJECTS = HOME / ".claude" / "projects"
-PIDFILE = pathlib.Path(tempfile.gettempdir()) / "claude-read-aloud.pid"
-PARTS = [
-    pathlib.Path(tempfile.gettempdir()) / f"claude-read-aloud-{i}.wav" for i in (0, 1)
-]
-
 IS_MAC = sys.platform == "darwin"
 IS_WIN = os.name == "nt"
+
+# Session isolation: each caller gets its own PID and WAV files
+_session_id = os.environ.get("READ_ALOUD_SESSION", "")
+
+
+def _session_suffix() -> str:
+    return f"-{_session_id}" if _session_id else ""
+
+
+def _pidfile() -> pathlib.Path:
+    return (
+        pathlib.Path(tempfile.gettempdir())
+        / f"claude-read-aloud{_session_suffix()}.pid"
+    )
+
+
+def _parts() -> list[pathlib.Path]:
+    s = _session_suffix()
+    return [
+        pathlib.Path(tempfile.gettempdir()) / f"claude-read-aloud{s}-{i}.wav"
+        for i in (0, 1)
+    ]
+
+
+# Legacy globals kept for backward compatibility; prefer _pidfile() / _parts()
+PIDFILE = _pidfile()
+PARTS = _parts()
 
 
 def config_path() -> pathlib.Path:
@@ -475,13 +497,14 @@ def speak_direct(text: str, cfg: dict) -> None:
         cmd.append(text)
 
     stop()
-    PIDFILE.write_text(str(os.getpid()))
+    pidf = _pidfile()
+    pidf.write_text(str(os.getpid()))
     p = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **quiet_win()
     )
     signal.signal(signal.SIGTERM, lambda *_: (p.terminate(), os._exit(0)))
     p.wait()
-    PIDFILE.unlink(missing_ok=True)
+    pidf.unlink(missing_ok=True)
 
 
 # ------------------------------------------------------------------ kokoro (local)
@@ -599,18 +622,20 @@ def setup_kokoro() -> int:
 
 
 def stop() -> None:
-    if PIDFILE.exists():
+    pidf = _pidfile()
+    if pidf.exists():
         try:
-            os.kill(int(PIDFILE.read_text().strip()), signal.SIGTERM)
+            os.kill(int(pidf.read_text().strip()), signal.SIGTERM)
         except (OSError, ValueError):
             pass
-        PIDFILE.unlink(missing_ok=True)
+        pidf.unlink(missing_ok=True)
 
 
 def play_chunked(text: str, cfg: dict, synth) -> None:
     """Gapless chunked playback: synthesise chunk i+1 while chunk i plays."""
-    stop()  # never overlap two readings
-    PIDFILE.write_text(str(os.getpid()))
+    stop()  # never overlap two readings within same session
+    pidf = _pidfile()
+    pidf.write_text(str(os.getpid()))
 
     state: dict = {"player": None}
 
@@ -620,15 +645,16 @@ def play_chunked(text: str, cfg: dict, synth) -> None:
             p.terminate()
         if _kokoro_runner and _kokoro_runner.poll() is None:
             _kokoro_runner.terminate()
-        PIDFILE.unlink(missing_ok=True)
+        pidf.unlink(missing_ok=True)
         os._exit(0)
 
     signal.signal(signal.SIGTERM, on_term)
 
+    parts = _parts()
     chunks = chunk_text(text, int(cfg["first_chars"]), int(cfg["chunk_chars"]))
-    synth(chunks[0], PARTS[0])
+    synth(chunks[0], parts[0])
     for i in range(len(chunks)):
-        cur = PARTS[i % 2]
+        cur = parts[i % 2]
         state["player"] = subprocess.Popen(
             player_cmd(cur),
             stdout=subprocess.DEVNULL,
@@ -638,13 +664,13 @@ def play_chunked(text: str, cfg: dict, synth) -> None:
         prefetch = None
         if i + 1 < len(chunks):
             prefetch = threading.Thread(
-                target=synth, args=(chunks[i + 1], PARTS[(i + 1) % 2]), daemon=True
+                target=synth, args=(chunks[i + 1], parts[(i + 1) % 2]), daemon=True
             )
             prefetch.start()
         state["player"].wait()
         if prefetch:
             prefetch.join()
-    PIDFILE.unlink(missing_ok=True)
+    pidf.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- modes
@@ -672,7 +698,11 @@ def hook_mode() -> int:
             return 0
         path = event.get("transcript_path", "")
         if path and pathlib.Path(path).exists():
-            detach(["--transcript", path])
+            # Pass session ID to detached process if set
+            argv = ["--transcript", path]
+            if _session_id:
+                argv.extend(["--session", _session_id])
+            detach(argv)
     except Exception as e:  # noqa: BLE001 — deliberate
         print(f"read-aloud hook: {e}", file=sys.stderr)
     return 0
@@ -910,6 +940,11 @@ def main() -> int:
     ap.add_argument("--stdin", action="store_true")
     ap.add_argument("--transcript")
     ap.add_argument("--project")
+    ap.add_argument(
+        "--session",
+        dest="session_id",
+        help="session ID for process isolation (env READ_ALOUD_SESSION also works)",
+    )
     ap.add_argument("--detach", action="store_true")
     ap.add_argument("--hook", action="store_true")
     ap.add_argument("--status", action="store_true")
@@ -943,6 +978,12 @@ def main() -> int:
     ap.add_argument("--auto", choices=["on", "off"])
     ap.add_argument("--print", action="store_true", dest="print_only")
     args = ap.parse_args()
+
+    # Set session ID for process isolation
+    global _session_id
+    if args.session_id:
+        _session_id = args.session_id
+    # READ_ALOUD_SESSION env var is already loaded at module level
 
     if args.hook:
         return hook_mode()

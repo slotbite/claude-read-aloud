@@ -6,6 +6,9 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/speak.py\" --hook || python \"${CLAUDE_PLUGIN_ROOT}/scripts/speak.py\" --hook",
+            "env": {
+              "READ_ALOUD_SESSION": "claude-code"
+            },
             "timeout": 15
           }
         ]
