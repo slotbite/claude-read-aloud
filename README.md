@@ -71,6 +71,7 @@ one plays, so there are no gaps.
 | --- | --- | --- |
 | `system` *(default)* | free | none — uses macOS `say`, Linux speech-dispatcher, or Windows SAPI |
 | `kokoro` | free | **`/read-aloud:voice-setup`** — local neural voice, 54 voices, no account (one-time ~340MB download) |
+| `omnivoice` | free | `speak.py --setup omnivoice` — local **voice cloning** ([OmniVoice]), needs an NVIDIA GPU (~3.3GB model, ~2GB VRAM); see below |
 | `speechify` | ~$10 / 1M chars | `export SPEECHIFY_API_KEY=…` |
 | `elevenlabs` | from ~$5/mo | `export ELEVENLABS_API_KEY=…` |
 | `openai` | ~$15 / 1M chars | `export OPENAI_API_KEY=…` |
@@ -91,6 +92,25 @@ Config lives at `~/.config/claude-read-aloud/config.json`
 `voice` is the provider's own voice name/id (macOS: `say -v '?'` lists yours;
 cloud providers list voices in their consoles). API keys go in environment
 variables, never in the file.
+
+### Cloned voices (OmniVoice)
+
+`speak.py --setup omnivoice` builds a private venv (torch + omnivoice) and fetches
+the model. Then build a library of voices from short reference clips (3–15 s of
+clean speech, any audio file) and pick one with `/read-aloud:voice`:
+
+```
+speak.py --add-voice mi_voz clip.wav --ref-text "what the clip says" --lang es
+speak.py --set-provider omnivoice && speak.py --set-voice mi_voz
+```
+
+Without `--ref-text` the clip is transcribed with Whisper (one-time ~1.5GB
+download). Voices live in `<data dir>/voces/<name>/` (never in the repo). The
+model stays loaded in a small loopback server that starts on demand (the first
+reading after a while pays ~20 s) and exits after `omnivoice_idle_min` idle
+minutes (default 15), returning the VRAM. Only clone voices you have the right
+to use. Config keys: `omnivoice_port`, `omnivoice_idle_min`, `omnivoice_python`
+(reuse an existing OmniVoice venv), `omnivoice_lang`, `omnivoice_hf_cache`.
 
 A local neural engine plugs in through `command` — `{text}` is replaced with
 the text to speak; add `{out}` if your engine writes a WAV for the plugin to
@@ -226,3 +246,4 @@ MIT.
 
 [Piper]: https://github.com/rhasspy/piper
 [Kokoro]: https://github.com/thewh1teagle/kokoro-onnx
+[OmniVoice]: https://github.com/k2-fsa/OmniVoice

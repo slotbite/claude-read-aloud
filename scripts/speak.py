@@ -85,6 +85,8 @@ def _parts() -> list[pathlib.Path]:
 
 
 def config_path() -> pathlib.Path:
+    if os.environ.get("READ_ALOUD_CONFIG"):  # tests / experiments
+        return pathlib.Path(os.environ["READ_ALOUD_CONFIG"])
     if IS_WIN:
         base = pathlib.Path(os.environ.get("APPDATA", HOME))
     else:
@@ -111,6 +113,11 @@ DEFAULTS = {
     "model": "",  # openai only; default tts-1
     "command": "",  # custom engine: template with {text} and/or {out}
     "announce_project": False,  # say the project folder name when the speaker changes
+    "omnivoice_port": 7853,  # loopback port of the persistent OmniVoice server
+    "omnivoice_idle_min": 15,  # server exits after this many idle minutes (frees VRAM)
+    "omnivoice_python": "",  # python of an existing OmniVoice venv; "" = our own
+    "omnivoice_lang": "",  # "" = the voice's own language / auto-detect
+    "omnivoice_hf_cache": "",  # HF_HUB_CACHE for the model; "" = default (see docs)
     "api_keys": {},  # optional; env vars take precedence
 }
 
@@ -118,7 +125,7 @@ DEFAULTS = {
 def load_config() -> dict:
     cfg = dict(DEFAULTS)
     try:
-        cfg.update(json.loads(config_path().read_text(encoding="utf-8")))
+        cfg.update(json.loads(config_path().read_text(encoding="utf-8-sig")))
     except (OSError, json.JSONDecodeError):
         pass
     return cfg
@@ -441,6 +448,27 @@ def make_synth(cfg: dict):
 
         return synth
 
+    if provider == "omnivoice":
+        voice = ov_check_voice(cfg["voice"])
+        ov_ensure(cfg)  # warm up now, even while this reading waits in the queue
+
+        def synth(text: str, out: pathlib.Path) -> None:
+            r = ov_request(
+                cfg,
+                "/synth",
+                {
+                    "text": text,
+                    "voice": voice,
+                    "speed": float(cfg["speed"] or 1.0),
+                    "lang": cfg.get("omnivoice_lang", ""),
+                    "out": str(out),
+                },
+            )
+            if not r.get("ok"):
+                raise RuntimeError(f"omnivoice: {r.get('error', 'failed')}")
+
+        return synth
+
     if provider == "command":
         template = cfg["command"]
         if not template:
@@ -613,6 +641,318 @@ def setup_kokoro() -> int:
         '54 voices (am_michael, am_puck, af_heart, bf_emma, …) — set "voice" in the config.'
     )
     return 0
+
+
+# ---------------------------------------------------------- omnivoice (local, cloning)
+#
+# OmniVoice takes ~5 s + a torch import to load, and every reply is a fresh
+# speak.py, so the model lives in a persistent loopback server
+# (omnivoice_server.py, run with the OmniVoice venv's python). speak.py starts it
+# on demand and the server exits by itself after omnivoice_idle_min idle minutes.
+# Cloned voices live in data_dir()/voces/<name>/{ref.wav,voz.json}.
+
+OV_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+OV_START_TIMEOUT_S = 150
+
+# Run by a short-lived intermediary: the server must not be a descendant of this
+# speak.py, because --stop uses `taskkill /T` (kills by parent pid) and would take
+# the model down with the reading. The intermediary exits right after the spawn,
+# which orphans the server out of the tree. Breakaway keeps it out of the hook's
+# job object (when the job forbids breakaway we retry without).
+OV_LAUNCHER = """import json, os, subprocess, sys
+a = json.loads(sys.argv[1])
+log = open(a["log"], "ab")
+kw = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
+if os.name == "nt":
+    base = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen(a["argv"], creationflags=base | 0x01000000, **kw)
+    except OSError:
+        subprocess.Popen(a["argv"], creationflags=base, **kw)
+else:
+    subprocess.Popen(a["argv"], start_new_session=True, **kw)
+"""
+
+
+def voices_dir() -> pathlib.Path:
+    return data_dir() / "voces"
+
+
+def library_voices() -> list[dict]:
+    """The cloned-voice library: [{id, idioma, texto}], by name."""
+    out = []
+    d = voices_dir()
+    if d.is_dir():
+        for p in sorted(d.iterdir()):
+            if OV_NAME_RE.match(p.name) and (p / "ref.wav").exists():
+                try:
+                    meta = json.loads((p / "voz.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    meta = {}
+                out.append(
+                    {
+                        "id": p.name,
+                        "idioma": meta.get("idioma", ""),
+                        "texto": meta.get("texto", ""),
+                    }
+                )
+    return out
+
+
+def ov_check_voice(voice: str) -> str:
+    """'' / 'auto' = the model's own voice; anything else must be in the library."""
+    voice = (voice or "").strip()
+    if voice in ("", "auto"):
+        return "auto"
+    if not OV_NAME_RE.match(voice) or not (voices_dir() / voice / "ref.wav").exists():
+        have = ", ".join(v["id"] for v in library_voices()) or "none yet"
+        sys.exit(
+            f'omnivoice: voice "{voice}" is not in the library ({have}). '
+            "Add one with: speak.py --add-voice NAME FILE.wav"
+        )
+    return voice
+
+
+def ov_python(cfg: dict) -> pathlib.Path:
+    if cfg.get("omnivoice_python"):
+        return pathlib.Path(cfg["omnivoice_python"])
+    return data_dir() / "omnivoice-venv" / ("Scripts/python.exe" if IS_WIN else "bin/python")
+
+
+def ov_server_script() -> pathlib.Path:
+    return pathlib.Path(os.path.abspath(__file__)).with_name("omnivoice_server.py")
+
+
+def ov_url(cfg: dict, path: str) -> str:
+    return f"http://127.0.0.1:{int(cfg['omnivoice_port'])}{path}"
+
+
+def ov_health(cfg: dict, timeout: float = 2.0) -> dict | None:
+    try:
+        with urllib.request.urlopen(ov_url(cfg, "/health"), timeout=timeout) as r:
+            h = json.loads(r.read())
+        return h if h.get("ok") else None
+    except (OSError, ValueError):
+        return None
+
+
+def ov_hf_cache(cfg: dict) -> str | None:
+    """HF_HUB_CACHE for the server, or None to keep the default Hugging Face cache.
+    Only the hub cache is redirected, NEVER HF_HOME: that also moves the token
+    that `hf auth login` stores, and gated downloads then fail."""
+    if os.environ.get("HF_HUB_CACHE"):
+        return None
+    if cfg.get("omnivoice_hf_cache"):
+        return str(cfg["omnivoice_hf_cache"])
+    bench = data_dir() / "bench" / "models" / "hf-omnivoice" / "hub"
+    if (bench / "models--k2-fsa--OmniVoice").is_dir():
+        return str(bench)  # already downloaded by the benchmark: skip 3 GB
+    return None
+
+
+def ov_start_server(cfg: dict) -> None:
+    py = ov_python(cfg)
+    if not py.exists():
+        sys.exit(
+            "omnivoice is not set up — run: speak.py --setup omnivoice "
+            "(or set omnivoice_python in the config to an existing venv)"
+        )
+    data_dir().mkdir(parents=True, exist_ok=True)
+    argv = [
+        str(py),
+        str(ov_server_script()),
+        "--port",
+        str(int(cfg["omnivoice_port"])),
+        "--idle-min",
+        str(cfg["omnivoice_idle_min"]),
+        "--voices-dir",
+        str(voices_dir()),
+    ]
+    env = dict(os.environ)
+    cache = ov_hf_cache(cfg)
+    if cache:
+        env["HF_HUB_CACHE"] = cache
+    env.setdefault("PYTHONUTF8", "1")
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            OV_LAUNCHER,
+            json.dumps({"argv": argv, "log": str(data_dir() / "omnivoice-server.log")}),
+        ],
+        env=env,
+        check=True,
+        timeout=30,
+        **quiet_win(),
+    )
+
+
+def ov_ensure(cfg: dict) -> dict:
+    """Make sure the server answers on its port; start it if not. Returns /health."""
+    h = ov_health(cfg)
+    if h is None:
+        ov_start_server(cfg)
+        deadline = time.time() + OV_START_TIMEOUT_S
+        while time.time() < deadline:
+            h = ov_health(cfg)
+            if h:
+                break
+            time.sleep(0.4)
+        else:
+            tail = ""
+            try:
+                tail = (data_dir() / "omnivoice-server.log").read_text(
+                    encoding="utf-8", errors="replace"
+                )[-600:]
+            except OSError:
+                pass
+            sys.exit(
+                f"omnivoice server did not come up within {OV_START_TIMEOUT_S}s "
+                f"(port {cfg['omnivoice_port']} busy, or model load failed). "
+                f"Log: {data_dir() / 'omnivoice-server.log'}\n{tail}"
+            )
+    if h.get("device") == "cpu":
+        print("omnivoice: no CUDA GPU, running on CPU (slow)", file=sys.stderr)
+    return h
+
+
+def ov_request(cfg: dict, path: str, payload: dict, timeout: float = 300) -> dict:
+    """POST JSON to the server; restart it once if it went away (idle shutdown)."""
+    import urllib.error
+
+    for attempt in (0, 1):
+        req = urllib.request.Request(
+            ov_url(cfg, path),
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            try:
+                msg = json.loads(e.read()).get("error", "")
+            except (OSError, ValueError):
+                msg = ""
+            raise RuntimeError(f"omnivoice server: {msg or e}") from None
+        except (urllib.error.URLError, ConnectionError):
+            if attempt:
+                raise
+            ov_ensure(cfg)
+    raise RuntimeError("unreachable")
+
+
+def add_voice(cfg: dict, name: str, src: str, ref_text: str, lang: str) -> int:
+    if not OV_NAME_RE.match(name):
+        print("voice name: letters, digits, _ and - only (max 64)", file=sys.stderr)
+        return 2
+    p = pathlib.Path(src).expanduser()
+    if not p.is_file():
+        print(f"reference audio not found: {src}", file=sys.stderr)
+        return 2
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # transcripts have accents
+    except (AttributeError, OSError):
+        pass
+    ov_ensure(cfg)
+    r = ov_request(
+        cfg,
+        "/add-voice",
+        {
+            "name": name,
+            "src": str(p.resolve()),
+            "text": ref_text,
+            "lang": lang,
+            "origin": p.name,
+            "voices_dir": str(voices_dir()),
+        },
+    )
+    how = "transcribed with Whisper" if r.get("transcribed") else "given"
+    print(f'voice "{name}" added ({r.get("seconds")} s reference, text {how}):')
+    print(f"  {r.get('text', '')}")
+    return 0
+
+
+def remove_voice(name: str) -> int:
+    import shutil
+
+    if not OV_NAME_RE.match(name) or not (voices_dir() / name).is_dir():
+        print(f'no voice "{name}" in the library', file=sys.stderr)
+        return 1
+    shutil.rmtree(voices_dir() / name)
+    print(f'voice "{name}" removed')
+    return 0
+
+
+def setup_omnivoice() -> int:
+    """Create data_dir()/omnivoice-venv (torch + omnivoice) and fetch the model."""
+    cfg = load_config()
+    d = data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    py = ov_python(cfg)
+    if cfg.get("omnivoice_python") and py.exists():
+        ok = subprocess.run(
+            [str(py), "-c", "import omnivoice, torch, soundfile"], capture_output=True
+        ).returncode == 0
+        if ok:
+            print(f"reusing the OmniVoice venv from omnivoice_python: {py}")
+    else:
+        py = d / "omnivoice-venv" / ("Scripts/python.exe" if IS_WIN else "bin/python")
+        if not py.exists():
+            print("creating a private virtualenv…", flush=True)
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(d / "omnivoice-venv")], check=True
+            )
+        pip = [str(py), "-m", "pip", "install", "--quiet"]
+        torch_cmd = pip + ["torch", "torchaudio"]
+        if _which("nvidia-smi"):
+            # Blackwell (RTX 50xx) needs the cu128 wheels; they run older GPUs too.
+            torch_cmd += ["--index-url", "https://download.pytorch.org/whl/cu128"]
+        else:
+            print("no NVIDIA GPU found: CPU torch (readings will be slow)")
+        print("installing torch (a few GB, several minutes)…", flush=True)
+        subprocess.run(torch_cmd, check=True)
+        print("installing omnivoice…", flush=True)
+        subprocess.run(pip + ["omnivoice", "soundfile"], check=True)
+
+    env = dict(os.environ)
+    cache = ov_hf_cache(cfg)
+    if cache:
+        env["HF_HUB_CACHE"] = cache
+    print("fetching the OmniVoice model (3.3 GB, skipped when cached)…", flush=True)
+    subprocess.run(
+        [
+            str(py),
+            "-c",
+            "from huggingface_hub import snapshot_download as s; s('k2-fsa/OmniVoice')",
+        ],
+        env=env,
+        check=True,
+    )
+    print(
+        "\nOmniVoice ready. Add a voice (reference clip of 3-15 s, any audio file):\n"
+        "  speak.py --add-voice NAME clip.wav [--ref-text \"what it says\"] [--lang es]\n"
+        "then: speak.py --set-provider omnivoice && speak.py --set-voice NAME\n"
+        "Without --ref-text the clip is transcribed with Whisper (+1.5 GB download, once)."
+    )
+    return 0
+
+
+def render_wav(text: str, cfg: dict, synth, out: pathlib.Path) -> float:
+    """Synthesise the whole text into one WAV, no playback, no queue (for tests
+    and auditions). Returns the synthesis seconds."""
+    t0 = time.time()
+    tmp = _parts()[0]
+    frames, params = b"", None
+    for c in chunk_text(text, int(cfg["first_chars"]), int(cfg["chunk_chars"])):
+        synth(c, tmp)
+        with wave.open(str(tmp), "rb") as w:
+            params = params or w.getparams()
+            frames += w.readframes(w.getnframes())
+    with wave.open(str(out), "wb") as w:
+        w.setparams(params)
+        w.writeframes(frames)
+    return time.time() - t0
 
 
 # ----------------------------------------------------------------------- playback
@@ -1005,6 +1345,11 @@ def list_voices(cfg: dict) -> int:
 
     if provider == "kokoro":
         voices = [{"id": v, "label": kokoro_label(v)} for v in KOKORO_VOICES]
+    elif provider == "omnivoice":
+        voices = [{"id": "auto", "label": "auto (the model's own voice)"}] + [
+            {"id": v["id"], "label": v["id"] + (f" ({v['idioma']})" if v["idioma"] else "")}
+            for v in library_voices()
+        ]
     elif provider == "openai":
         voices = [{"id": v, "label": v} for v in OPENAI_VOICES]
     elif provider == "speechify":
@@ -1114,6 +1459,13 @@ def show_status(cfg: dict) -> None:
     print(f"speed     : {cfg['speed']}")
     print(f"auto_read : {'on — every reply is spoken' if cfg['auto_read'] else 'off'}")
     print(f"api keys  : " + "  ".join(f"{p}:{s}" for p, s in keys.items()))
+    if cfg["provider"] == "omnivoice" or library_voices():
+        h = ov_health(cfg)
+        print(
+            f"omnivoice : venv {'ok' if ov_python(cfg).exists() else 'missing (--setup omnivoice)'}"
+            f", server {('up on ' + str(h.get('device'))) if h else 'down (starts on demand)'}"
+            f", {len(library_voices())} cloned voice(s) in {voices_dir()}"
+        )
 
 
 def main() -> int:
@@ -1137,8 +1489,29 @@ def main() -> int:
     ap.add_argument("--status", action="store_true")
     ap.add_argument(
         "--setup",
-        choices=["kokoro"],
-        help="one-time install of the free local neural voice",
+        choices=["kokoro", "omnivoice"],
+        help="one-time install of a local neural voice",
+    )
+    ap.add_argument(
+        "--add-voice",
+        nargs=2,
+        metavar=("NAME", "AUDIO"),
+        dest="add_voice",
+        help="omnivoice: add a cloned voice to the library from a reference clip",
+    )
+    ap.add_argument("--ref-text", dest="ref_text", default="", help="transcript of the clip")
+    ap.add_argument("--lang", default="", help="language of the clip (es, en, …)")
+    ap.add_argument("--remove-voice", dest="remove_voice", metavar="NAME")
+    ap.add_argument(
+        "--stop-server",
+        action="store_true",
+        dest="stop_server",
+        help="shut the omnivoice server down now (frees the GPU)",
+    )
+    ap.add_argument(
+        "--render",
+        metavar="OUT.wav",
+        help="synthesise the text to this WAV instead of playing it",
     )
     ap.add_argument("--voice", help="use this voice for this run only (audition)")
     ap.add_argument(
@@ -1153,7 +1526,15 @@ def main() -> int:
     ap.add_argument(
         "--set-provider",
         dest="set_provider",
-        choices=["system", "kokoro", "speechify", "elevenlabs", "openai", "command"],
+        choices=[
+            "system",
+            "kokoro",
+            "omnivoice",
+            "speechify",
+            "elevenlabs",
+            "openai",
+            "command",
+        ],
     )
     ap.add_argument("--set-speed", dest="set_speed", type=float)
     ap.add_argument(
@@ -1180,9 +1561,22 @@ def main() -> int:
         return 0
 
     if args.setup:
-        return setup_kokoro()
+        return setup_omnivoice() if args.setup == "omnivoice" else setup_kokoro()
 
     cfg = load_config()
+    if args.add_voice:
+        return add_voice(
+            cfg, args.add_voice[0], args.add_voice[1], args.ref_text, args.lang
+        )
+    if args.remove_voice:
+        return remove_voice(args.remove_voice)
+    if args.stop_server:
+        if ov_health(cfg):
+            ov_request(cfg, "/shutdown", {}, timeout=10)
+            print("omnivoice server stopped")
+        else:
+            print("omnivoice server was not running")
+        return 0
     if args.get_config:
         vp, model, vb, runner = kokoro_paths()
         print(
@@ -1193,6 +1587,8 @@ def main() -> int:
                     "speed": cfg["speed"],
                     "auto_read": bool(cfg["auto_read"]),
                     "kokoro_ready": all(p.exists() for p in (vp, model, vb, runner)),
+                    "omnivoice_ready": ov_python(cfg).exists(),
+                    "omnivoice_voices": [v["id"] for v in library_voices()],
                     "keys": {
                         p: bool(
                             os.environ.get(f"{p.upper()}_API_KEY")
@@ -1222,6 +1618,8 @@ def main() -> int:
     if args.list_voices:
         return list_voices(cfg)
     if args.set_voice:
+        if cfg["provider"] == "omnivoice":
+            args.set_voice = "" if args.set_voice == "auto" else ov_check_voice(args.set_voice)
         cfg["voice"] = args.set_voice
         save_config(cfg)
         print(f"voice set to {args.set_voice} ({cfg['provider']})")
@@ -1282,6 +1680,14 @@ def main() -> int:
         return 0
 
     synth = make_synth(cfg)
+
+    if args.render:
+        if synth is None:
+            print("this provider speaks directly; nothing to render", file=sys.stderr)
+            return 1
+        secs = render_wav(text, cfg, synth, pathlib.Path(args.render))
+        print(f"rendered {args.render} in {secs:.2f}s", file=sys.stderr)
+        return 0
 
     def play(prev_session: str) -> None:
         t = text
