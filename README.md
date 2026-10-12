@@ -103,6 +103,20 @@ play (that's what enables gapless chunking):
 }
 ```
 
+## Several projects at once
+
+Run Claude Code in two projects with auto-read on and the replies no longer
+fight for the speaker. Every reading goes through one machine-wide queue, so
+only one voice speaks at a time:
+
+- A reply from **another** project waits its turn; it never cuts the current one.
+- A new reply from the **same** project replaces its own earlier one (playing
+  or still waiting), so you never hear stale text.
+- `/speak-stop` (or the VS Code stop button) silences the current reading **and**
+  empties the queue. Readings that wait more than 10 minutes are dropped.
+- Optional: set `"announce_project": true` in the config and the project folder
+  name is spoken first whenever the voice switches to a different project.
+
 ## The fine print that saves you a support ticket
 
 - **Auto-read is off by default, on purpose.** A working session produces hours

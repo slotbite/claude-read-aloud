@@ -6,7 +6,7 @@
   speak.py --transcript FILE    …from one specific session transcript
   speak.py --text "…"           speak the given text
   speak.py --stdin              speak the text arriving on stdin
-  speak.py --stop               stop playback
+  speak.py --stop               stop playback and clear the queue (--session X: only X)
   speak.py --detach             re-launch detached, return immediately
   speak.py --hook               Stop-hook mode: exit fast unless auto_read is on
   speak.py --status             show current configuration
@@ -21,9 +21,13 @@ Design notes, learned the hard way before this was a plugin:
   (measured: 3.3s at 260 chars vs 10.7s at 1800, same voice). Chunks ramp
   ~260 → ~1000 → 1800 at sentence boundaries; chunk i+1 synthesises while
   chunk i plays, so later chunks cost no waiting and there are no gaps.
-* THE ORCHESTRATOR IS THE PROCESS YOU STOP. This process stays alive for the
-  whole playback, records its pid, and SIGTERM takes down the current player
-  with it. Starting a new reading stops the old one first.
+* ONE VOICE AT A TIME, MACHINE-WIDE. Readings from every session queue FIFO
+  in a temp directory and take a cross-process lock to play. A new reading from
+  the SAME session replaces that session's earlier one (playing or waiting);
+  another session's reading waits its turn. --stop clears everything.
+* THE ORCHESTRATOR IS THE PROCESS YOU STOP. It stays alive for the whole
+  playback and its pid is recorded in the lock/ticket; killing it takes down
+  the current player with it.
 * SPEECHIFY'S WAV NEEDS ITS HEADER FIXED. It arrives with the RIFF/data sizes
   set to 0xFFFFFFFF (a streaming placeholder); some players then play the
   header bytes as audio — it sounds like a burst of static.
@@ -46,6 +50,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 import wave
 
@@ -56,32 +61,27 @@ PROJECTS = HOME / ".claude" / "projects"
 IS_MAC = sys.platform == "darwin"
 IS_WIN = os.name == "nt"
 
-# Session isolation: each caller gets its own PID and WAV files
+# Session identity. The Stop hook passes Claude Code's own session_id; other
+# callers pass --session (or READ_ALOUD_SESSION). No session = "manual".
+DEFAULT_SESSION = "manual"
 _session_id = os.environ.get("READ_ALOUD_SESSION", "")
 
 
-def _session_suffix() -> str:
-    return f"-{_session_id}" if _session_id else ""
+def sanitize_session(raw: str) -> str:
+    """Make a session id safe for file names ('_' is reserved as a delimiter)."""
+    return re.sub(r"[^A-Za-z0-9.-]", "-", raw or "").strip("-.")[:64]
 
 
-def _pidfile() -> pathlib.Path:
-    return (
-        pathlib.Path(tempfile.gettempdir())
-        / f"claude-read-aloud{_session_suffix()}.pid"
-    )
+def _session() -> str:
+    return sanitize_session(_session_id) or DEFAULT_SESSION
 
 
 def _parts() -> list[pathlib.Path]:
-    s = _session_suffix()
+    """Per-session WAV pair, so two syntheses never write the same file."""
     return [
-        pathlib.Path(tempfile.gettempdir()) / f"claude-read-aloud{s}-{i}.wav"
+        pathlib.Path(tempfile.gettempdir()) / f"claude-read-aloud-{_session()}-{i}.wav"
         for i in (0, 1)
     ]
-
-
-# Legacy globals kept for backward compatibility; prefer _pidfile() / _parts()
-PIDFILE = _pidfile()
-PARTS = _parts()
 
 
 def config_path() -> pathlib.Path:
@@ -110,6 +110,7 @@ DEFAULTS = {
     "first_chars": 260,  # first chunk is tiny: its size is the latency
     "model": "",  # openai only; default tts-1
     "command": "",  # custom engine: template with {text} and/or {out}
+    "announce_project": False,  # say the project folder name when the speaker changes
     "api_keys": {},  # optional; env vars take precedence
 }
 
@@ -496,15 +497,11 @@ def speak_direct(text: str, cfg: dict) -> None:
             cmd += ["-r", str(max(-100, min(100, int((speed - 1.0) * 100))))]
         cmd.append(text)
 
-    stop()
-    pidf = _pidfile()
-    pidf.write_text(str(os.getpid()))
     p = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **quiet_win()
     )
-    signal.signal(signal.SIGTERM, lambda *_: (p.terminate(), os._exit(0)))
+    _children.append(p)
     p.wait()
-    pidf.unlink(missing_ok=True)
 
 
 # ------------------------------------------------------------------ kokoro (local)
@@ -621,35 +618,222 @@ def setup_kokoro() -> int:
 # ----------------------------------------------------------------------- playback
 
 
-def stop() -> None:
-    pidf = _pidfile()
-    if pidf.exists():
+# ------------------------------------------------------------- global reading queue
+#
+# One voice at a time, machine-wide. Layout, inside <tempdir>/claude-read-aloud-queue/:
+#   <ns-timestamp>_<pid>_<session>.req   a TICKET: "I want to speak" (FIFO by name)
+#   playing.lock                         "<pid>\n<session>": whoever is speaking
+#   last-session                         session that spoke last (announce_project)
+#
+# The lock is created with O_CREAT|O_EXCL, which is atomic on NTFS and POSIX
+# alike, so it needs no fcntl/msvcrt. A crashed owner would leave it behind, so
+# every waiter checks the owner pid and deletes the lock when that process is
+# gone (the "orphan" case). Tickets of dead pids are purged the same way.
+
+QUEUE_ROOT: pathlib.Path | None = None  # tests override; default is the tempdir
+MAX_WAIT_S = 600  # a ticket waiting longer than this is dropped
+POLL_S = 0.25
+
+# Popen objects (player, direct-speech engine) that must die with this process.
+_children: list = []
+
+
+def queue_dir() -> pathlib.Path:
+    d = QUEUE_ROOT or (pathlib.Path(tempfile.gettempdir()) / "claude-read-aloud-queue")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def pid_alive(pid: int) -> bool:
+    """Is this pid a live process? Never uses os.kill(pid, 0) on Windows: there
+    os.kill TERMINATES the target for any signal that is not a console event."""
+    if pid <= 0:
+        return False
+    if IS_WIN:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return k32.GetLastError() == 5  # ACCESS_DENIED: exists, not ours
         try:
-            os.kill(int(pidf.read_text().strip()), signal.SIGTERM)
-        except (OSError, ValueError):
-            pass
-        pidf.unlink(missing_ok=True)
+            code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(ctypes.c_void_p(h), ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
-def play_chunked(text: str, cfg: dict, synth) -> None:
-    """Gapless chunked playback: synthesise chunk i+1 while chunk i plays."""
-    stop()  # never overlap two readings within same session
-    pidf = _pidfile()
-    pidf.write_text(str(os.getpid()))
+def kill_tree(pid: int) -> None:
+    """Stop a reading process together with its player. On Windows SIGTERM is a
+    hard TerminateProcess that runs no handler (the player would keep talking),
+    hence taskkill /T; on POSIX the SIGTERM handler terminates the player."""
+    if pid == os.getpid() or pid <= 0:
+        return
+    try:
+        if IS_WIN:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                **quiet_win(),
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
 
-    state: dict = {"player": None}
+
+def _unlink(p: pathlib.Path) -> None:
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
+def _tickets() -> list[tuple[str, int, str, pathlib.Path]]:
+    """Tickets as (timestamp, pid, session, path), oldest first."""
+    out = []
+    for p in queue_dir().glob("*.req"):
+        parts = p.stem.split("_", 2)
+        if len(parts) == 3 and parts[1].isdigit():
+            out.append((parts[0], int(parts[1]), parts[2], p))
+    return sorted(out, key=lambda t: t[0])
+
+
+def _read_lock() -> tuple[int, str] | None:
+    try:
+        pid, _, sess = (queue_dir() / "playing.lock").read_text().partition("\n")
+        return int(pid), sess.strip()
+    except (OSError, ValueError):
+        return None
+
+
+def _purge() -> None:
+    """Drop tickets of dead processes or older than MAX_WAIT_S, and an orphan lock."""
+    now = time.time()
+    for _ts, pid, _s, p in _tickets():
+        try:
+            age = now - p.stat().st_mtime
+        except OSError:
+            continue
+        if not pid_alive(pid):
+            _unlink(p)
+        elif age > MAX_WAIT_S:
+            kill_tree(pid)
+            _unlink(p)
+    lock = queue_dir() / "playing.lock"
+    if lock.exists():
+        held = _read_lock()
+        # A freshly created lock may still be empty: only judge a readable one.
+        if held is not None and not pid_alive(held[0]):
+            _unlink(lock)
+
+
+def _try_lock(session: str) -> bool:
+    try:
+        fd = os.open(
+            str(queue_dir() / "playing.lock"), os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        )
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as f:
+        f.write(f"{os.getpid()}\n{session}")
+    return True
+
+
+def stop(session: str | None = None) -> None:
+    """Stop the current reading and drop queued ones: everything when session is
+    None, otherwise only that session's."""
+    # Waiting tickets go first: killing the lock owner frees the lock, and a
+    # waiter we meant to drop would otherwise grab it and start talking.
+    for _ts, pid, sess, p in _tickets():
+        if session is None or sess == session:
+            kill_tree(pid)
+            _unlink(p)
+    held = _read_lock()
+    if held and (session is None or held[1] == session):
+        kill_tree(held[0])
+        for _ in range(20):  # let it exit (POSIX: its handler frees the lock)
+            if not pid_alive(held[0]):
+                break
+            time.sleep(0.1)
+        if not pid_alive(held[0]):
+            _unlink(queue_dir() / "playing.lock")
+
+
+def run_turn(session: str, fn, max_wait: float | None = None) -> bool:
+    """Wait for this session's turn, run fn(previous_session), release the turn.
+
+    * An earlier reading of the SAME session (playing or waiting) is replaced.
+    * Readings of other sessions are served first-come-first-served.
+    Returns False if the wait ran out (the reading is dropped)."""
+    qd = queue_dir()
+    stop(session)  # same-session replacement
+    ticket = qd / f"{time.time_ns():020d}_{os.getpid()}_{session}.req"
+    ticket.write_text("")
+    lock = qd / "playing.lock"
+    have_lock = False
+
+    def cleanup() -> None:
+        _unlink(ticket)
+        if have_lock and (_read_lock() or (0,))[0] == os.getpid():
+            _unlink(lock)
 
     def on_term(_sig, _frm):
-        p = state["player"]
-        if p and p.poll() is None:
-            p.terminate()
+        for p in _children:
+            if p.poll() is None:
+                p.terminate()
         if _kokoro_runner and _kokoro_runner.poll() is None:
             _kokoro_runner.terminate()
-        pidf.unlink(missing_ok=True)
+        cleanup()
         os._exit(0)
 
     signal.signal(signal.SIGTERM, on_term)
+    deadline = time.time() + (MAX_WAIT_S if max_wait is None else max_wait)
+    try:
+        while True:
+            _purge()
+            head = _tickets()
+            if not ticket.exists():  # purged (timeout) or stopped
+                return False
+            if head and head[0][3] == ticket and _try_lock(session):
+                have_lock = True
+                break
+            if time.time() > deadline:
+                return False
+            time.sleep(POLL_S)
+        _unlink(ticket)  # lock taken: the ticket has served its purpose
+        last = qd / "last-session"
+        try:
+            prev = last.read_text().strip()
+        except OSError:
+            prev = ""
+        try:
+            last.write_text(session)
+        except OSError:
+            pass
+        fn(prev)
+        return True
+    finally:
+        cleanup()
 
+
+def play_chunked(text: str, cfg: dict, synth) -> None:
+    """Gapless chunked playback: synthesise chunk i+1 while chunk i plays.
+
+    Runs inside a queue turn (see run_turn): it never overlaps another reading."""
+    state: dict = {"player": None}
     parts = _parts()
     chunks = chunk_text(text, int(cfg["first_chars"]), int(cfg["chunk_chars"]))
     synth(chunks[0], parts[0])
@@ -661,6 +845,7 @@ def play_chunked(text: str, cfg: dict, synth) -> None:
             stderr=subprocess.DEVNULL,
             **quiet_win(),
         )
+        _children.append(state["player"])
         prefetch = None
         if i + 1 < len(chunks):
             prefetch = threading.Thread(
@@ -670,7 +855,6 @@ def play_chunked(text: str, cfg: dict, synth) -> None:
         state["player"].wait()
         if prefetch:
             prefetch.join()
-    pidf.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- modes
@@ -698,10 +882,11 @@ def hook_mode() -> int:
             return 0
         path = event.get("transcript_path", "")
         if path and pathlib.Path(path).exists():
-            # Pass session ID to detached process if set
-            argv = ["--transcript", path]
-            if _session_id:
-                argv.extend(["--session", _session_id])
+            sid = sanitize_session(event.get("session_id", "")) or DEFAULT_SESSION
+            argv = ["--transcript", path, "--session", sid]
+            cwd = event.get("cwd") or ""
+            if cwd:
+                argv += ["--label", pathlib.Path(cwd).name]
             detach(argv)
     except Exception as e:  # noqa: BLE001 — deliberate
         print(f"read-aloud hook: {e}", file=sys.stderr)
@@ -943,8 +1128,10 @@ def main() -> int:
     ap.add_argument(
         "--session",
         dest="session_id",
-        help="session ID for process isolation (env READ_ALOUD_SESSION also works)",
+        help="session ID: same-session readings replace each other, others queue "
+        "(env READ_ALOUD_SESSION also works)",
     )
+    ap.add_argument("--label", help="project name, spoken when announce_project is on")
     ap.add_argument("--detach", action="store_true")
     ap.add_argument("--hook", action="store_true")
     ap.add_argument("--status", action="store_true")
@@ -988,7 +1175,8 @@ def main() -> int:
     if args.hook:
         return hook_mode()
     if args.stop:
-        stop()
+        # Without an explicit session: stop everything and clear the queue.
+        stop(_session() if (args.session_id or _session_id) else None)
         return 0
 
     if args.setup:
@@ -1094,10 +1282,17 @@ def main() -> int:
         return 0
 
     synth = make_synth(cfg)
-    if synth is None:
-        speak_direct(text, cfg)
-    else:
-        play_chunked(text, cfg, synth)
+
+    def play(prev_session: str) -> None:
+        t = text
+        if cfg.get("announce_project") and args.label and prev_session != _session():
+            t = f"{args.label}. {t}"
+        if synth is None:
+            speak_direct(t, cfg)
+        else:
+            play_chunked(t, cfg, synth)
+
+    run_turn(_session(), play)
     return 0
 
 

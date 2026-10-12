@@ -47,6 +47,9 @@ Registro del lote: `.orquestacion/voces-cola/` (local, no versionado).
 - Una lectura de **otra** sesión espera su turno; no interrumpe.
 - `--stop` sin `--session` detiene todo y vacía la cola; con `--session` solo esa sesión.
 - Se revierte el `env` agregado a `hooks/hooks.json` (no verificado como campo válido).
+- Implementado: tickets `<ns>_<pid>_<sesión>.req` + `playing.lock` (`O_EXCL`) en
+  `<tmp>/claude-read-aloud-queue/`; espera máx. 10 min; sesión por defecto `manual`;
+  `announce_project` opcional (`--label` lo pasa el hook desde `cwd`).
 
 ## Estado
 
