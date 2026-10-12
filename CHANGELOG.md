@@ -3,8 +3,8 @@
 ## [Sin publicar]
 
 ### En curso
-- Elegir voz en español escuchando el banco (`bench/voces/`) y, si hay ganador, integrarlo como
-  proveedor (int-4) — ver `docs/plan.md`.
+- Ganó OmniVoice (int-4 integrado). Falta probarlo como proveedor por defecto con el hook real y
+  pre-calentar el servidor en SessionStart para evitar ~20 s en la primera lectura.
 
 ### Agregado
 - Proveedor `omnivoice` (int-4, clonación de voz local): servidor persistente en loopback
