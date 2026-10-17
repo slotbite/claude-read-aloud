@@ -1264,11 +1264,18 @@ def detach(argv: list[str]) -> None:
         "stderr": subprocess.DEVNULL,
         "stdin": subprocess.DEVNULL,
     }
-    if IS_WIN:
-        kwargs["creationflags"] = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), *argv], **kwargs)
+    cmd = [sys.executable, os.path.abspath(__file__), *argv]
+    if not IS_WIN:
+        subprocess.Popen(cmd, start_new_session=True, **kwargs)
+        return
+    # Breakaway: Claude Code runs hooks in a job object and kills it when the
+    # hook returns, which took the reading down with it — it got its queue turn
+    # and died before a word was heard. When the job forbids breakaway, retry.
+    flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen(cmd, creationflags=flags | 0x01000000, **kwargs)
+    except OSError:
+        subprocess.Popen(cmd, creationflags=flags, **kwargs)
 
 
 def hook_mode() -> int:
