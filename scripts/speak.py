@@ -58,6 +58,11 @@ import wave
 
 HOME = pathlib.Path.home()
 PROJECTS = HOME / ".claude" / "projects"
+# Who is reading right now, for the VS Code button (vscode-extension/extension.js
+# reads it). The queue below is the real authority; this mirrors its holder.
+PIDFILE = pathlib.Path(tempfile.gettempdir()) / "claude-read-aloud.pid"
+PART_GLOB = "claude-read-aloud-*-[01].wav"
+
 IS_MAC = sys.platform == "darwin"
 IS_WIN = os.name == "nt"
 
@@ -77,9 +82,12 @@ def _session() -> str:
 
 
 def _parts() -> list[pathlib.Path]:
-    """Per-session WAV pair, so two syntheses never write the same file."""
+    """Per-process WAV pair. Per session is not enough: a reading being replaced
+    by one of its own session is still winding down while the new one
+    synthesises, and a shared file is heard as garble, not as a handover."""
     return [
-        pathlib.Path(tempfile.gettempdir()) / f"claude-read-aloud-{_session()}-{i}.wav"
+        pathlib.Path(tempfile.gettempdir())
+        / f"claude-read-aloud-{_session()}-{os.getpid()}-{i}.wav"
         for i in (0, 1)
     ]
 
@@ -1112,23 +1120,38 @@ def stop(session: str | None = None) -> None:
             _unlink(queue_dir() / "playing.lock")
 
 
-def run_turn(session: str, fn, max_wait: float | None = None) -> bool:
-    """Wait for this session's turn, run fn(previous_session), release the turn.
+def _sweep_parts() -> None:
+    """Bin scratch audio a crashed reading left behind — an hour is long past."""
+    cutoff = time.time() - 3600
+    try:
+        for part in pathlib.Path(tempfile.gettempdir()).glob(PART_GLOB):
+            if part.stat().st_mtime < cutoff:
+                _unlink(part)
+    except OSError:
+        pass
 
-    * An earlier reading of the SAME session (playing or waiting) is replaced.
-    * Readings of other sessions are served first-come-first-served.
-    Returns False if the wait ran out (the reading is dropped)."""
-    qd = queue_dir()
+
+def _release_pidfile() -> None:
+    try:
+        if PIDFILE.read_text().strip() == str(os.getpid()):
+            _unlink(PIDFILE)
+    except (OSError, ValueError):
+        pass
+
+
+def take_ticket(session: str) -> pathlib.Path:
+    """Get in line for this session, replacing its earlier reading.
+
+    Taken when a run STARTS, not when its audio does: a reading spends its first
+    seconds loading a model or waiting on an API, and a second request landing
+    in that window must still replace it instead of queueing behind it."""
     stop(session)  # same-session replacement
-    ticket = qd / f"{time.time_ns():020d}_{os.getpid()}_{session}.req"
+    ticket = queue_dir() / f"{time.time_ns():020d}_{os.getpid()}_{session}.req"
     ticket.write_text("")
-    lock = qd / "playing.lock"
-    have_lock = False
-
-    def cleanup() -> None:
-        _unlink(ticket)
-        if have_lock and (_read_lock() or (0,))[0] == os.getpid():
-            _unlink(lock)
+    try:
+        PIDFILE.write_text(str(os.getpid()))
+    except OSError:
+        pass
 
     def on_term(_sig, _frm):
         for p in _children:
@@ -1136,10 +1159,40 @@ def run_turn(session: str, fn, max_wait: float | None = None) -> bool:
                 p.terminate()
         if _kokoro_runner and _kokoro_runner.poll() is None:
             _kokoro_runner.terminate()
-        cleanup()
+        _unlink(ticket)
+        if (_read_lock() or (0,))[0] == os.getpid():
+            _unlink(queue_dir() / "playing.lock")
+        _release_pidfile()
+        for part in _parts():
+            _unlink(part)
         os._exit(0)
 
     signal.signal(signal.SIGTERM, on_term)
+    _sweep_parts()
+    return ticket
+
+
+def run_turn(
+    session: str, fn, max_wait: float | None = None, ticket: pathlib.Path | None = None
+) -> bool:
+    """Wait for this session's turn, run fn(previous_session), release the turn.
+
+    * An earlier reading of the SAME session (playing or waiting) is replaced.
+    * Readings of other sessions are served first-come-first-served.
+    Returns False if the wait ran out (the reading is dropped)."""
+    qd = queue_dir()
+    ticket = ticket or take_ticket(session)
+    lock = qd / "playing.lock"
+    have_lock = False
+
+    def cleanup() -> None:
+        _unlink(ticket)
+        if have_lock and (_read_lock() or (0,))[0] == os.getpid():
+            _unlink(lock)
+        _release_pidfile()
+        for part in _parts():
+            _unlink(part)
+
     deadline = time.time() + (MAX_WAIT_S if max_wait is None else max_wait)
     try:
         while True:
@@ -1149,6 +1202,10 @@ def run_turn(session: str, fn, max_wait: float | None = None) -> bool:
                 return False
             if head and head[0][3] == ticket and _try_lock(session):
                 have_lock = True
+                try:  # a later request of another session may have written it
+                    PIDFILE.write_text(str(os.getpid()))
+                except OSError:
+                    pass
                 break
             if time.time() > deadline:
                 return False
@@ -1679,6 +1736,10 @@ def main() -> int:
         print(text)
         return 0
 
+    # In line before the engine is built, not after: loading a 300MB model or
+    # waiting on a cloud voice is exactly the window a second click lands in.
+    # A render is not a reading: it neither queues nor replaces one.
+    ticket = None if args.render else take_ticket(_session())
     synth = make_synth(cfg)
 
     if args.render:
@@ -1698,7 +1759,7 @@ def main() -> int:
         else:
             play_chunked(t, cfg, synth)
 
-    run_turn(_session(), play)
+    run_turn(_session(), play, ticket=ticket)
     return 0
 
 
