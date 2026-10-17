@@ -206,6 +206,54 @@ def last_reply(path: pathlib.Path) -> str:
     return text
 
 
+def _is_prompt(e: dict) -> bool:
+    """A message the person typed — not a tool result, not a meta/command note."""
+    if e.get("type") != "user" or e.get("isMeta"):
+        return False
+    c = e.get("message", {}).get("content")
+    if isinstance(c, str):
+        return bool(c.strip()) and not c.lstrip().startswith("<local-command")
+    return isinstance(c, list) and any(
+        isinstance(b, dict) and b.get("type") == "text" for b in c
+    )
+
+
+def turn_reply(path: pathlib.Path, timeout: float = 8.0) -> str:
+    """The reply that ENDED this turn: assistant text written after the last
+    prompt. The Stop hook fires before that text always reaches the transcript,
+    and last_reply() would then read the previous turn's answer aloud — one
+    reply late. Waits (bounded) for it to land, and for the file to settle."""
+    deadline = time.time() + timeout
+    while True:
+        text, settled = "", False
+        try:
+            before = path.stat().st_mtime
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in lines:
+                try:
+                    e = json.loads(line) if line.strip() else {}
+                except json.JSONDecodeError:
+                    continue
+                if _is_prompt(e):
+                    text = ""
+                elif e.get("type") == "assistant":
+                    blocks = e.get("message", {}).get("content", [])
+                    if isinstance(blocks, list):
+                        joined = "".join(
+                            b.get("text", "")
+                            for b in blocks
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                        if joined.strip():
+                            text = joined
+            time.sleep(0.3)
+            settled = path.stat().st_mtime == before
+        except OSError:
+            pass
+        if (text and settled) or time.time() > deadline:
+            return text
+
+
 def spoken_form(md: str, max_chars: int) -> str:
     """Markdown reads terribly aloud — strip everything that is not prose."""
     s = re.sub(r"```.*?```", " ", md, flags=re.S)
@@ -672,7 +720,11 @@ a = json.loads(sys.argv[1])
 log = open(a["log"], "ab")
 kw = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
 if os.name == "nt":
-    base = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    # CREATE_NO_WINDOW, not DETACHED_PROCESS: a venv's python.exe is a redirector
+    # that starts the real interpreter as its child, and a child of a detached
+    # (consoleless) process gets a NEW console — a black terminal window that
+    # stays open as long as the server lives. A hidden console is inherited.
+    base = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     try:
         subprocess.Popen(a["argv"], creationflags=base | 0x01000000, **kw)
     except OSError:
@@ -1287,7 +1339,13 @@ def hook_mode() -> int:
         path = event.get("transcript_path", "")
         if path and pathlib.Path(path).exists():
             sid = sanitize_session(event.get("session_id", "")) or DEFAULT_SESSION
-            argv = ["--transcript", path, "--session", sid]
+            # Newer Claude Code hands over the reply itself; otherwise the reader
+            # waits for this turn's reply to reach the transcript.
+            msg = event.get("last_assistant_message")
+            if isinstance(msg, str) and msg.strip() and len(msg) < 30000:
+                argv = ["--text", msg, "--session", sid]
+            else:
+                argv = ["--transcript", path, "--wait-reply", "--session", sid]
             cwd = event.get("cwd") or ""
             if cwd:
                 argv += ["--label", pathlib.Path(cwd).name]
@@ -1540,6 +1598,8 @@ def main() -> int:
     ap.add_argument("--text")
     ap.add_argument("--stdin", action="store_true")
     ap.add_argument("--transcript")
+    # Hook use: wait for this turn's reply instead of reading whatever is last.
+    ap.add_argument("--wait-reply", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--project")
     ap.add_argument(
         "--session",
@@ -1733,7 +1793,7 @@ def main() -> int:
         if not t or not t.exists():
             print("no transcript found", file=sys.stderr)
             return 1
-        raw = last_reply(t)
+        raw = turn_reply(t) if args.wait_reply else last_reply(t)
 
     text = spoken_form(raw, int(cfg["max_chars"]))
     if not text:
